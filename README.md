@@ -7,7 +7,7 @@ Analyse et visualisation du marché des transferts dans les 5 grands championnat
 ## 🔗 Liens
 
 - 📊 [Rapport d'analyse](https://frantrab08.github.io/football-transfers-analysis/projet.html)
-- 🚀 [Application Shiny interactive](https://frantrab08.shinyapps.io/football-transfers-analysis/)
+- 🚀 [Application Shiny interactive](https://frantrab.shinyapps.io/football-transfers-analysis/)
 
 ---
 
