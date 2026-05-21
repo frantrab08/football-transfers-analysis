@@ -1,0 +1,939 @@
+---
+title: "Le marché des transferts du Big 5 européen : une inflation incontrôlée ?"
+author: "Bart François"
+date: "20/04/20026"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.width  = 10,
+  fig.height = 6,
+  fig.align  = "center"
+)
+```
+
+# Installation des packages
+
+> **Note** : décommenter les lignes ci-dessous uniquement si les packages ne sont pas encore installés. Cette cellule ne s'exécute pas automatiquement (`eval=FALSE`).
+
+```{r installation, eval=FALSE}
+# install.packages("tidyverse")
+# install.packages("ggplot2")
+# install.packages("scales")
+# install.packages("ggrepel")
+# install.packages("plotly")
+# install.packages("lubridate")
+# install.packages("ggtext")
+# install.packages("patchwork")
+```
+
+```{r libraries}
+library(tidyverse)
+library(ggplot2)
+library(scales)
+library(ggrepel)
+library(plotly)
+library(lubridate)
+library(ggtext)
+library(patchwork)
+```
+
+---
+
+# Spécification
+
+## Questions de recherche
+
+On s'intéresse à l'économie du marché des transferts dans les cinq grands championnats européens — Premier League, La Liga, Ligue 1, Serie A et Bundesliga (le "Big 5"). L'idée c'est de comprendre comment ce marché a évolué, qui dépense quoi, et si les prix payés ont encore un rapport avec la valeur réelle des joueurs. Voici les six questions qu'on cherche à explorer :
+
+1. **Comment les dépenses en transferts ont-elles évolué depuis 2002 ?** Y a-t-il un moment où tout s'est emballé ?
+
+2. **Quels sont les 25 transferts les plus chers de l'histoire ?** Est-ce que les records sont de plus en plus récents ?
+
+3. **Les clubs paient-ils les joueurs à leur juste valeur ?** On compare le prix payé à la valeur estimée par Transfermarkt.
+
+4. **La valeur marchande des joueurs a-t-elle explosé dans toutes les ligues, ou surtout en Premier League ?**
+
+5. **Qui vend le plus — et à qui ?** Balance nette entre achats et ventes par championnat.
+
+6. **Combien coûte un joueur selon son poste ?** Est-ce qu'un attaquant vaut vraiment plus cher qu'un défenseur ?
+
+7. **Les championnats vendent-ils surtout entre eux ou à l'étranger ?** On distingue ventes internes et ventes hors championnat.
+
+## Sources de données
+
+Toutes les données viennent du projet open source **transfermarkt-datasets**, maintenu par David Cariboo. C'est un scraping automatisé de transfermarkt.com, mis à jour chaque semaine.
+
+- **GitHub** : https://github.com/dcaribou/transfermarkt-datasets
+- **Licence** : Creative Commons Attribution 4.0 (CC BY 4.0)
+
+Fichiers utilisés :
+
+- `transfers.csv` — 157 186 transferts (frais, valeur marchande, clubs, saisons)
+- `players.csv` — 47 703 joueurs (position, nationalité, valeur)
+- `clubs.csv` — 797 clubs avec leur championnat domestique
+- `player_valuations.csv` — 616 378 estimations de valeur marchande depuis 2000
+
+---
+
+# Traitement des données
+
+## Chargement
+
+```{r chargement}
+# On charge les 4 fichiers CSV — ils doivent être dans le même dossier que ce fichier Rmd
+transfers  <- read_csv("data/transfers.csv",         show_col_types = FALSE)
+players    <- read_csv("data/players.csv",           show_col_types = FALSE)
+clubs      <- read_csv("data/clubs.csv",             show_col_types = FALSE)
+valuations <- read_csv("data/player_valuations.csv", show_col_types = FALSE)
+
+```
+
+## Nettoyage et préparation
+
+```{r traitement}
+# -------------------------------------------------------
+# Constantes globales
+# -------------------------------------------------------
+
+# Codes des 5 grands championnats dans le dataset
+BIG5_CODES <- c("GB1", "ES1", "FR1", "IT1", "L1")
+
+# Noms lisibles associés à chaque code
+LEAGUE_LABELS <- c(
+  GB1 = "Premier League",
+  ES1 = "La Liga",
+  FR1 = "Ligue 1",
+  IT1 = "Serie A",
+  L1  = "Bundesliga"
+)
+
+# Une couleur par ligue — on garde la même palette dans toutes les viz
+LEAGUE_COLORS <- c(
+  "Premier League" = "#3d85c8",
+  "La Liga"        = "#e06c44",
+  "Ligue 1"        = "#8e44ad",
+  "Serie A"        = "#27ae60",
+  "Bundesliga"     = "#e74c3c"
+)
+
+# -------------------------------------------------------
+# Table de correspondance club -> ligue
+# -------------------------------------------------------
+clubs_big5 <- clubs %>%
+  filter(domestic_competition_id %in% BIG5_CODES) %>%
+  select(club_id, domestic_competition_id) %>%
+  mutate(league_name = LEAGUE_LABELS[domestic_competition_id])
+
+# -------------------------------------------------------
+# Fonction utilitaire : convertir "23/24" -> 2023
+# -------------------------------------------------------
+season_to_year <- function(s) {
+  yr <- as.integer(substr(s, 1, 2))
+  # Si > 50 on est dans les années 1900 (ex: "98/99" -> 1998), sinon 2000
+  ifelse(yr > 50, 1900L + yr, 2000L + yr)
+}
+
+# -------------------------------------------------------
+# Table de transferts enrichie — base pour toutes les viz
+# -------------------------------------------------------
+transfers_clean <- transfers %>%
+  mutate(
+    year           = season_to_year(transfer_season),
+    transfer_fee_m = transfer_fee / 1e6,        # conversion en millions €
+    market_value_m = market_value_in_eur / 1e6
+  ) %>%
+  filter(!is.na(year)) %>%
+  # On joint la ligue du club ACHETEUR (to_club) pour savoir où le joueur arrive
+  left_join(
+    clubs_big5 %>% select(club_id, league_name),
+    by = c("to_club_id" = "club_id")
+  )
+
+# -------------------------------------------------------
+# VIZ 1 : dépenses totales par ligue et par année
+# -------------------------------------------------------
+viz1_data <- transfers_clean %>%
+  filter(
+    transfer_fee > 0,     # uniquement les transferts payants
+    !is.na(league_name),  # uniquement les clubs du Big 5
+    year >= 2002,
+    year <= 2025          # 2026 = mercato d'hiver seulement, ça fausserait la fin de courbe
+  ) %>%
+  group_by(year, league_name) %>%
+  summarise(
+    total_depenses_m = sum(transfer_fee_m, na.rm = TRUE),
+    nb_transferts    = n(),
+    .groups = "drop"
+  )
+
+# -------------------------------------------------------
+# VIZ 2 : top 25 transferts historiques (1 ligne = 1 transfert unique)
+# -------------------------------------------------------
+viz2_data <- transfers_clean %>%
+  filter(transfer_fee > 0) %>%
+  slice_max(transfer_fee, n = 25, with_ties = FALSE) %>%
+  mutate(
+    league_name  = if_else(is.na(league_name), "Autre", league_name),
+    # Label unique pour différencier si un joueur apparaît plusieurs fois (ex: Neymar)
+    label_unique = paste0(player_name, " -> ", to_club_name, " (", year, ")"),
+    label_unique = fct_reorder(label_unique, transfer_fee),
+    fee_label    = paste0(round(transfer_fee_m, 0), "M€  (", year, ")")
+  )
+
+# -------------------------------------------------------
+# VIZ 3 : ratio prix payé / valeur marchande
+# -------------------------------------------------------
+viz3_data <- transfers_clean %>%
+  filter(
+    transfer_fee > 0,
+    market_value_in_eur > 0,  # on a besoin des deux valeurs
+    !is.na(league_name),
+    year >= 2010,
+    year <= 2026
+  ) %>%
+  left_join(
+    players %>% select(player_id, position, sub_position),
+    by = "player_id"
+  ) %>%
+  mutate(ratio = transfer_fee / market_value_in_eur) %>%
+  filter(ratio <= 10)  # on enlève les cas aberrants
+
+# -------------------------------------------------------
+# VIZ 4 : valeur marchande médiane par ligue dans le temps
+# -------------------------------------------------------
+viz4_data <- valuations %>%
+  mutate(year = year(as.Date(date))) %>%
+  filter(
+    player_club_domestic_competition_id %in% BIG5_CODES,
+    year >= 2005,
+    year <= 2026
+  ) %>%
+  mutate(league_name = LEAGUE_LABELS[player_club_domestic_competition_id]) %>%
+  group_by(year, league_name) %>%
+  summarise(
+    median_value_m = median(market_value_in_eur, na.rm = TRUE) / 1e6,
+    .groups = "drop"
+  )
+
+# -------------------------------------------------------
+# VIZ 5 : balance nette des transferts (achats - ventes) par ligue
+# -------------------------------------------------------
+
+# Total des achats par ligue (club acheteur dans le Big 5)
+achats_par_ligue <- transfers_clean %>%
+  filter(transfer_fee > 0, !is.na(league_name), year >= 2002, year <= 2026) %>%
+  group_by(league_name) %>%
+  summarise(achats_m = sum(transfer_fee_m, na.rm = TRUE), .groups = "drop")
+
+# Total des ventes par ligue (club vendeur dans le Big 5)
+ventes_par_ligue <- transfers %>%
+  mutate(
+    year           = season_to_year(transfer_season),
+    transfer_fee_m = transfer_fee / 1e6
+  ) %>%
+  filter(transfer_fee > 0, !is.na(year), year >= 2002, year <= 2026) %>%
+  # On joint la ligue du club VENDEUR cette fois (from_club)
+  left_join(
+    clubs_big5 %>% select(club_id, league_name) %>% rename(from_league = league_name),
+    by = c("from_club_id" = "club_id")
+  ) %>%
+  filter(!is.na(from_league)) %>%
+  group_by(from_league) %>%
+  summarise(ventes_m = sum(transfer_fee_m, na.rm = TRUE), .groups = "drop") %>%
+  rename(league_name = from_league)
+
+# Balance = ventes - achats (positif = excédentaire, négatif = déficitaire)
+viz5_data <- ventes_par_ligue %>%
+  left_join(achats_par_ligue, by = "league_name") %>%
+  mutate(
+    balance_m   = ventes_m - achats_m,
+    statut      = if_else(balance_m >= 0, "Excédentaire", "Déficitaire"),
+    league_name = fct_reorder(league_name, balance_m)
+  )
+
+# -------------------------------------------------------
+# VIZ 6 : coût médian par poste
+# -------------------------------------------------------
+
+# Traduction des sous-postes en français
+traduction_postes <- c(
+  "Centre-Forward"      = "Avant-centre",
+  "Second Striker"      = "Deuxième attaquant",
+  "Left Winger"         = "Ailier gauche",
+  "Right Winger"        = "Ailier droit",
+  "Attacking Midfield"  = "Milieu offensif",
+  "Central Midfield"    = "Milieu central",
+  "Defensive Midfield"  = "Milieu défensif",
+  "Left Midfield"       = "Milieu gauche",
+  "Right Midfield"      = "Milieu droit",
+  "Centre-Back"         = "Défenseur central",
+  "Left-Back"           = "Latéral gauche",
+  "Right-Back"          = "Latéral droit",
+  "Goalkeeper"          = "Gardien"
+)
+
+viz6_data <- transfers_clean %>%
+  filter(
+    transfer_fee > 0,
+    !is.na(league_name),
+    year >= 2002,
+    year <= 2026
+  ) %>%
+  left_join(
+    players %>% select(player_id, position, sub_position),
+    by = "player_id"
+  ) %>%
+  filter(!is.na(sub_position)) %>%
+  # Traduction du poste
+  mutate(sub_position_fr = traduction_postes[sub_position],
+         sub_position_fr = if_else(is.na(sub_position_fr), sub_position, sub_position_fr)) %>%
+  group_by(position, sub_position_fr) %>%
+  summarise(
+    median_fee_m = median(transfer_fee_m, na.rm = TRUE),
+    nb           = n(),
+    .groups = "drop"
+  ) %>%
+  filter(nb >= 30) %>%
+  mutate(sub_position_fr = fct_reorder(sub_position_fr, median_fee_m))
+
+# -------------------------------------------------------
+# VIZ 7 : ventes par ligue — interne vs externe dans le temps
+# -------------------------------------------------------
+viz7_data <- transfers %>%
+  mutate(
+    year           = season_to_year(transfer_season),
+    transfer_fee_m = transfer_fee / 1e6
+  ) %>%
+  filter(transfer_fee > 0, !is.na(year), year >= 2002, year <= 2025) %>%
+  # Ligue du club VENDEUR
+  left_join(
+    clubs_big5 %>% select(club_id, league_name) %>% rename(from_league = league_name),
+    by = c("from_club_id" = "club_id")
+  ) %>%
+  # Ligue du club ACHETEUR
+  left_join(
+    clubs_big5 %>% select(club_id, league_name) %>% rename(to_league = league_name),
+    by = c("to_club_id" = "club_id")
+  ) %>%
+  filter(!is.na(from_league)) %>%
+  # Interne = même championnat, Externe = ailleurs
+  mutate(type_vente = if_else(from_league == to_league, "Interne", "Externe")) %>%
+  group_by(year, from_league, type_vente) %>%
+  summarise(total_m = sum(transfer_fee_m, na.rm = TRUE), .groups = "drop") %>%
+  # Pivoter pour avoir interne et externe en colonnes
+  pivot_wider(names_from = type_vente, values_from = total_m, values_fill = 0) %>%
+  mutate(total = Interne + Externe)
+
+```
+
+---
+
+# Visualisations
+
+## Viz 1 — Évolution des dépenses en transferts par ligue (2002–2026)
+
+**Question :** Est-ce que les dépenses ont vraiment explosé, et si oui, à partir de quand ?
+
+```{r viz1, fig.height=6.5}
+p1 <- ggplot(viz1_data, aes(x = year, y = total_depenses_m,
+                             color = league_name, group = league_name)) +
+  # Légère zone colorée sous la courbe de la PL pour la mettre en valeur
+  geom_area(
+    data = viz1_data %>% filter(league_name == "Premier League"),
+    aes(y = total_depenses_m), fill = "#3d85c8", alpha = 0.08
+  ) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.2, alpha = 0.85) +
+  # Ligne verticale pour marquer le transfert de Neymar (rupture du marché)
+  geom_vline(xintercept = 2017, linetype = "dashed",
+             color = "grey40", linewidth = 0.7) +
+  annotate("text", x = 2017.3, y = 3200,
+           label = "Neymar\n222M€", hjust = 0, size = 3.2,
+           color = "grey30", fontface = "italic") +
+  # Étiquettes à la fin des courbes 
+  geom_text_repel(
+    data = viz1_data %>% filter(year == max(year)),
+    aes(label = league_name),
+    nudge_x = 0.5, direction = "y", hjust = 0,
+    size = 3.3, segment.color = "grey70", show.legend = FALSE
+  ) +
+  scale_color_manual(values = LEAGUE_COLORS) +
+  scale_x_continuous(
+    breaks = seq(2002, 2025, by = 2),
+    expand = expansion(mult = c(0.02, 0.12))
+  ) +
+  scale_y_continuous(
+    labels = label_dollar(prefix = "", suffix = "M€", big.mark = " ")
+  ) +
+  labs(
+    title    = "Dépenses en transferts dans le Big 5 européen (2002–2026)",
+    subtitle = "Montants cumulés des transferts entrants payants, en millions d'euros",
+    x        = NULL,
+    y        = "Dépenses totales (M€)",
+    caption  = "Source : transfermarkt-datasets — github.com/dcaribou/transfermarkt-datasets"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 14),
+    plot.subtitle      = element_text(color = "grey40", size = 11),
+    legend.position    = "none",
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    plot.caption       = element_text(color = "grey60", size = 9)
+  )
+
+p1
+```
+
+**Lecture :** La Premier League écrase les autres championnats depuis 2010, et l'écart ne fait que se creuser. La vraie rupture c'est 2017 avec le transfert de Neymar au PSG pour 222M€, ça a comme débloqué un nouveau palier de prix pour tout le monde.On peut appercevoir que ça commence à monter depuis les années 2O12. En 2023–2024, les clubs anglais dépensent à eux seuls autant que les quatre autres ligues réunies, soit environ 3 milliards d'euros sur une saison.
+
+**Regard critique :** Ce graphique mélange les transferts entre clubs d'un même championnat et les achats à l'extérieur. Ça gonfle un peu les chiffres de la Premier League qui a un marché interne très actif, sans que ça reflète forcément une injection d'argent frais dans le football européen.
+
+---
+
+## Viz 2 — Les 25 transferts les plus chers de l'histoire
+
+**Question :** Les records sont-ils de plus en plus récents ? Quels championnats concentrent les plus grosses transactions ?
+
+```{r viz2, fig.height=9}
+p2 <- ggplot(viz2_data, aes(x = label_unique, y = transfer_fee_m, fill = league_name)) +
+  geom_col(width = 0.75, alpha = 0.9) +
+  
+  geom_text(aes(label = fee_label), hjust = -0.08, size = 3.1, color = "grey25") +
+  coord_flip() +
+  scale_fill_manual(values = c(LEAGUE_COLORS, "Autre" = "#95a5a6")) +
+  scale_y_continuous(
+    labels = label_dollar(prefix = "", suffix = "M€", big.mark = " "),
+    expand = expansion(mult = c(0, 0.22))
+  ) +
+  labs(
+    title    = "Les 25 transferts les plus chers de l'histoire du football",
+    subtitle = "Frais de transfert en millions d'euros — un transfert par ligne",
+    x        = NULL,
+    y        = "Montant du transfert (M€)",
+    fill     = "Championnat\nd'arrivée",
+    caption  = "Source : transfermarkt-datasets"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(color = "grey40", size = 10),
+    legend.position    = c(0.85, 0.25),
+    legend.background  = element_rect(fill = "white", color = "grey85"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    plot.caption       = element_text(color = "grey60", size = 9)
+  )
+
+p2
+```
+
+**Lecture :** Neymar (222M€ vers le PSG en 2017) reste le record absolu. Presque tous les transferts du top 25 ont eu lieu après 2016, c'est assez frappant. Premier League et La Liga ont la majorité de ces deals, avec quelques exceptions comme Neymar en Ligue 1 ou Ronaldo en Serie A.
+
+**Regard critique :** Ces montants sont en euros courants, pas corrigés de l'inflation. Zidane à 77M€ en 2001 aurait probablement dépassé les 150M€ avec les prix d'aujourd'hui, ce qui biaise mécaniquement le classement en faveur des transferts récents.
+
+---
+
+## Viz 3 — Prix payé vs valeur marchande : les clubs paient-ils au juste prix ?
+
+**Question :** Est-ce qu'il y a un écart systématique entre ce qu'on paye et ce que Transfermarkt estime ? Qui surpaye le plus ?
+
+```{r viz3, fig.height=6.5}
+p3 <- ggplot(viz3_data, aes(x = market_value_m, y = transfer_fee_m)) +
+  # La droite pointillée = "juste prix" (price = valeur marchande exactement)
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+              color = "grey50", linewidth = 0.8) +
+  annotate("text", x = 90, y = 96, label = "Juste prix (ratio = 1)",
+           color = "grey50", size = 3.2, angle = 42, fontface = "italic") +
+  geom_point(aes(color = league_name), alpha = 0.35, size = 1.8) +
+  # Droite de tendance par ligue pour visualiser si les clubs ont tendance à surpayer
+  geom_smooth(aes(color = league_name), method = "lm", se = FALSE, linewidth = 1) +
+  scale_color_manual(values = LEAGUE_COLORS) +
+  scale_x_continuous(
+    labels = label_dollar(prefix = "", suffix = "M€"), limits = c(0, 120)
+  ) +
+  scale_y_continuous(
+    labels = label_dollar(prefix = "", suffix = "M€"), limits = c(0, 160)
+  ) +
+  facet_wrap(~ league_name, nrow = 2) +
+  labs(
+    title    = "Prix payé vs valeur marchande Transfermarkt (2010–2026)",
+    subtitle = "Chaque point = un transfert. Au-dessus de la ligne pointillée = surpayé.",
+    x        = "Valeur marchande estimée (M€)",
+    y        = "Prix de transfert payé (M€)",
+    color    = NULL,
+    caption  = "Source : transfermarkt-datasets — Transferts payants uniquement, ratio <= 10"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 13),
+    plot.subtitle    = element_text(color = "grey40", size = 10),
+    legend.position  = "none",
+    strip.text       = element_text(face = "bold", size = 10.5),
+    panel.grid.minor = element_blank(),
+    plot.caption     = element_text(color = "grey60", size = 9)
+  )
+
+p3
+```
+
+```{r viz3b}
+# Vue complémentaire en boxplot — plus lisible pour comparer les ligues entre elles
+# On crée d'abord la variable reordonnée pour éviter le conflit discret/continu
+viz3_data_box <- viz3_data %>%
+  mutate(league_ordered = fct_reorder(league_name, ratio, median))
+
+p3b <- ggplot(viz3_data_box, aes(x = league_ordered, y = ratio, fill = league_name)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  geom_boxplot(alpha = 0.75, outlier.alpha = 0.2, outlier.size = 1) +
+  # "Juste prix" placé directement sur la ligne horizontale, sans coordonnée X numérique
+  geom_text(
+    data = data.frame(league_ordered = levels(viz3_data_box$league_ordered)[1],
+                      ratio = 1.07),
+    aes(x = league_ordered, y = ratio, label = "Juste prix"),
+    color = "grey45", size = 3.2, fontface = "italic",
+    hjust = -0.1, inherit.aes = FALSE
+  ) +
+  scale_fill_manual(values = LEAGUE_COLORS) +
+  scale_y_continuous(breaks = c(0, 0.5, 1, 1.5, 2, 3)) +
+  coord_cartesian(ylim = c(0, 3.5)) +
+  labs(
+    title    = "Distribution du ratio prix payé / valeur marchande par championnat",
+    subtitle = "Ratio > 1 = surpayé par rapport à l'estimation Transfermarkt",
+    x        = NULL,
+    y        = "Ratio prix payé / valeur marchande",
+    caption  = "Source : transfermarkt-datasets"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 13),
+    plot.subtitle    = element_text(color = "grey40", size = 10),
+    legend.position  = "none",
+    panel.grid.minor = element_blank(),
+    plot.caption     = element_text(color = "grey60", size = 9)
+  )
+
+p3b
+```
+
+**Lecture :** Le ratio médian est proche de 1 (environ 0,95), ce qui veut dire que Transfermarkt est globalement un bon estimateur du marché. Mais la distribution est asymétrique. Quelques transferts sont vraiment surpayés et tirent la moyenne vers le haut. La Premier League a tendance à payer une prime plus élevée que les autres, ce qui est cohérent avec leur puissance financière.
+
+**Regard critique :** Il y a une forme de circularité : la valeur marchande Transfermarkt est elle-même influencée par les prix du marché. De plus, les transferts gratuits (fins de contrat, prêts) ne sont pas inclus, ce qui biaise l'échantillon vers les joueurs les plus chers.
+
+---
+
+## Viz 4 — Évolution de la valeur marchande médiane par ligue (2005–2026)
+
+**Question :** La valeur des joueurs a-t-elle augmenté partout de la même façon, ou la Premier League creuse-t-elle vraiment l'écart ?
+
+```{r viz4, fig.height=6.5}
+p4 <- ggplot(viz4_data, aes(x = year, y = median_value_m,
+                             color = league_name, group = league_name)) +
+  # Zone bleue pour visualiser l'écart entre la PL et les autres ligues
+  geom_ribbon(
+    data = viz4_data %>%
+      pivot_wider(names_from = league_name, values_from = median_value_m) %>%
+      mutate(ymin = pmin(`La Liga`, `Ligue 1`, `Serie A`, `Bundesliga`, na.rm = TRUE)),
+    aes(ymin = ymin, ymax = `Premier League`, x = year),
+    fill = "#3d85c8", alpha = 0.07, inherit.aes = FALSE
+  ) +
+  geom_line(linewidth = 1.3) +
+  geom_point(size = 2, alpha = 0.8) +
+  geom_text_repel(
+    data = viz4_data %>% filter(year == max(year)),
+    aes(label = league_name),
+    nudge_x = 0.5, direction = "y", hjust = 0,
+    size = 3.2, segment.color = "grey70", show.legend = FALSE
+  ) +
+  scale_color_manual(values = LEAGUE_COLORS) +
+  scale_x_continuous(
+    breaks = seq(2005, 2026, by = 3),
+    expand = expansion(mult = c(0.02, 0.14))
+  ) +
+  scale_y_continuous(labels = label_dollar(prefix = "", suffix = "M€")) +
+  labs(
+    title    = "Valeur marchande médiane des joueurs du Big 5 (2005–2026)",
+    subtitle = "Zone bleue = écart entre la Premier League et les autres championnats",
+    x        = NULL,
+    y        = "Valeur marchande médiane (M€)",
+    color    = NULL,
+    caption  = "Source : transfermarkt-datasets"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(color = "grey40", size = 10),
+    legend.position    = "none",
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    plot.caption       = element_text(color = "grey60", size = 9)
+  )
+
+p4
+```
+
+**Lecture :** La valeur des joueurs a augmenté dans toutes les ligues depuis 2005, mais la Premier League décroche vraiment à partir de 2013–2014. La zone bleue montre bien l'écart qui se creuse. En 2024, un joueur médian de Premier League vaut 2 à 3 fois plus qu'un joueur de Serie A ou de Bundesliga.
+
+**Regard critique :** La médiane reste sensible à la composition des effectifs. Les clubs anglais recrutent beaucoup d'étrangers coûteux, ce qui gonfle mécaniquement la valeur médiane, c'est pas juste de l'inflation, c'est aussi une stratégie de recrutement différente.
+
+---
+
+## Viz 5 — Balance nette des transferts par championnat (2002–2026)
+
+**Question :** Qui dépense plus qu'il ne gagne ? Quels championnats sont "acheteurs nets" et lesquels sont "vendeurs nets" ?
+
+```{r viz5, fig.height=5.5}
+p5 <- ggplot(viz5_data, aes(x = league_name, y = balance_m, fill = statut)) +
+  geom_col(width = 0.6, alpha = 0.9) +
+  # Ligne à zéro pour bien séparer excédentaire / déficitaire
+  geom_hline(yintercept = 0, color = "grey30", linewidth = 0.7) +
+  # Montant affiché sur chaque barre
+  geom_text(
+    aes(
+      label = paste0(if_else(balance_m > 0, "+", ""), round(balance_m / 1000, 1), " Mds€"),
+      vjust = if_else(balance_m > 0, -0.5, 1.3)
+    ),
+    size = 3.5, fontface = "bold", color = "grey20"
+  ) +
+  scale_fill_manual(
+    values = c("Excédentaire" = "#27ae60", "Déficitaire" = "#e74c3c"),
+    name   = NULL
+  ) +
+  scale_y_continuous(
+    labels = label_dollar(prefix = "", suffix = "M€", big.mark = " "),
+    expand = expansion(mult = c(0.15, 0.15))
+  ) +
+  labs(
+    title    = "Balance nette des transferts par championnat (2002–2026)",
+    subtitle = "Ventes cumulées − Achats cumulés sur toute la période",
+    x        = NULL,
+    y        = "Balance nette (M€)",
+    caption  = "Source : transfermarkt-datasets"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(color = "grey40", size = 10),
+    legend.position    = "bottom",
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    plot.caption       = element_text(color = "grey60", size = 9)
+  )
+
+p5
+```
+
+**Lecture :** La Premier League est massivement déficitaire. Elle dépense beaucoup plus qu'elle ne vend, ce qui fait d'elle le principal moteur financier du marché global. À l'inverse, la Ligue 1 et la Bundesliga ont tendance à être excédentaires : elles vendent plus qu'elles n'achètent, souvent au profit des clubs anglais ou espagnols. La Serie A et La Liga sont dans des situations plus intermédiaires.
+
+**Regard critique :** Ces chiffres ne tiennent pas compte des prêts ni des joueurs formés en interne vendus, ce qui peut changer l'image de certains clubs qui misent beaucoup sur leur académie. La balance nette mesure les flux financiers, pas la performance sportive.
+
+---
+
+## Viz 6 — Coût médian d'un transfert selon le poste (2002–2026)
+
+**Question :** Est-ce qu'un attaquant coûte vraiment plus cher qu'un défenseur ou un gardien ?
+
+```{r viz6, fig.height=6}
+# Une couleur par grande famille de postes
+position_colors <- c(
+  "Attack"     = "#e06c44",
+  "Midfield"   = "#3d85c8",
+  "Defender"   = "#27ae60",
+  "Goalkeeper" = "#8e44ad"
+)
+
+p6 <- ggplot(viz6_data, aes(x = sub_position_fr, y = median_fee_m, fill = position)) +
+  geom_col(width = 0.7, alpha = 0.88) +
+  # Nombre de transferts sur chaque barre pour contextualiser la fiabilité de la médiane
+  geom_text(aes(label = paste0("n=", nb)),
+            hjust = -0.15, size = 2.9, color = "grey40") +
+  coord_flip() +
+  scale_fill_manual(values = position_colors, name = "Position") +
+  scale_y_continuous(
+    labels = label_dollar(prefix = "", suffix = "M€"),
+    expand = expansion(mult = c(0, 0.2))
+  ) +
+  labs(
+    title    = "Coût médian d'un transfert selon le poste (2002–2026)",
+    subtitle = "Transferts payants dans le Big 5 — postes avec au moins 30 observations",
+    x        = NULL,
+    y        = "Frais de transfert médian (M€)",
+    caption  = "Source : transfermarkt-datasets"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(color = "grey40", size = 10),
+    legend.position    = "right",
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    plot.caption       = element_text(color = "grey60", size = 9)
+  )
+
+p6
+```
+
+**Lecture :** Sans surprise, les postes offensifs (ailiers, attaquants) sont les plus chers. Ce qui est plus intéressant, c'est que les milieux défensifs ont une valeur médiane assez élevée, proche des défenseurs centraux : un poste de plus en plus valorisé ces dernières années. Les gardiens restent les moins chers en médiane malgré leur rôle clé, probablement parce qu'il y en a beaucoup qui changent de clubs pour des petits montants.
+
+**Regard critique :** La médiane lisse beaucoup, un gardien comme Kepa à 80M€ reste une exception rarissime. Et certains sous-postes ont peu d'observations (même avec le filtre à 30), ce qui rend leur médiane moins robuste.
+
+---
+
+## Viz 7 — Ventes internes vs externes par championnat (2002–2025)
+
+**Question :** Les championnats vendent-ils surtout entre eux ou à l'étranger ? Qui sont les vrais exportateurs du marché ?
+
+```{r viz7, fig.height=6.5}
+viz7_long <- viz7_data %>%
+  pivot_longer(cols = c(Externe, Interne),
+               names_to  = "type",
+               values_to = "montant_m") %>%
+  mutate(type = if_else(type == "Externe",
+                        "Ventes hors championnat",
+                        "Ventes internes au championnat"))
+
+p7 <- ggplot(viz7_long, aes(x = year, y = montant_m,
+                             fill = from_league, alpha = type)) +
+  # On empile interne + externe = total visible
+  geom_col(position = "stack", width = 0.8) +
+  scale_fill_manual(values = LEAGUE_COLORS) +
+  # Zone foncée = externe (plus opaque), zone claire = interne
+  scale_alpha_manual(
+    values = c("Ventes hors championnat"       = 0.95,
+               "Ventes internes au championnat" = 0.35),
+    name = NULL
+  ) +
+  scale_x_continuous(breaks = seq(2002, 2025, by = 3)) +
+  scale_y_continuous(labels = label_dollar(prefix = "", suffix = "M€")) +
+  facet_wrap(~ from_league, nrow = 2, scales = "fixed") +
+  labs(
+    title    = "Recettes de transferts par championnat : internes vs externes (2002–2025)",
+    subtitle = "Barre foncée = ventes hors du championnat · Barre claire = ventes entre clubs du même championnat",
+    x        = NULL,
+    y        = "Recettes (M€)",
+    fill     = NULL,
+    caption  = "Source : transfermarkt-datasets"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(color = "grey40", size = 10),
+    strip.text         = element_text(face = "bold", size = 10.5),
+    legend.position    = "bottom",
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    plot.caption       = element_text(color = "grey60", size = 9)
+  ) +
+  guides(fill = "none")
+
+p7
+```
+
+**Lecture :** La différence de profil entre les championnats saute aux yeux. La Premier League a une part claire (ventes internes) bien plus importante que les autres. Les clubs anglais s'achètent beaucoup entre eux. À l'inverse, la Bundesliga et la Ligue 1 ont presque exclusivement de la zone foncée : la quasi-totalité de leurs recettes provient de ventes à l'étranger. Ce sont des championnats exportateurs, qui alimentent le marché global en joueurs.
+
+**Regard critique :** Ces barres empilées rendent la comparaison entre années plus difficile que sur une courbe. Mais elles permettent de bien distinguer les deux types de ventes simultanément, ce qu'une ligne seule ne ferait pas. On aurait pu normaliser en pourcentage, mais on aurait alors perdu l'information sur le volume total.
+
+---
+
+# Conclusion
+
+Les sept visualisations racontent une histoire cohérente sur le marché des transferts européens. Tout s'est accéléré autour de 2017 avec le transfert de Neymar, qui a cassé un plafond psychologique sur les prix. Depuis, les montants ne font qu'augmenter.
+
+La Premier League est clairement le moteur de cette inflation : elle dépense massivement (avec une balance nette très déficitaire), recrute les joueurs les plus chers, et affiche des valeurs marchandes médianes 2 à 3 fois supérieures aux autres championnats. En face, des ligues comme la Ligue 1 ou la Bundesliga jouent plutôt le rôle de viviers, elles forment et vendent, souvent au profit des clubs anglais ou espagnols.
+
+Ce modèle soulève des questions sur les inégalités compétitives qu'il génère, et sur sa soutenabilité à long terme. D'autant que les prix payés s'éloignent parfois significativement des valeurs marchandes estimées.
+
+---
+
+# Utilisation de l'IA générative
+
+## Démarche
+
+Une fois les visualisations et le tableau de bord finalisés, nous avons utilisé Claude (Anthropic) pour analyser notre travail et suggérer des améliorations. Nous lui avons soumis le code R Markdown complet et l'app Shiny, en lui demandant d'identifier des faiblesses méthodologiques ou graphiques et de proposer des pistes concrètes.
+
+## Suggestions de l'IA et discussion
+
+**1. Biais des montants non corrigés de l'inflation (viz2)**
+
+L'IA a souligné que comparer des transferts de 2002 et 2024 en euros courants favorise mécaniquement les années récentes : Zidane à 77M€ en 2001 aurait probablement dépassé les 150M€ avec les prix d'aujourd'hui. **Pertinent, non appliqué** : les données d'inflation ne font pas partie de notre dataset, et l'ajout d'une source externe aurait complexifié le traitement pour une valeur ajoutée limitée dans le cadre de ce projet. Le biais est mentionné dans le regard critique de la viz2.
+
+**2. Circularité du ratio prix/valeur marchande (viz3)**
+
+L'IA a identifié que la valeur marchande Transfermarkt est elle-même influencée par les prix du marché, créant une circularité partielle dans la comparaison prix payé / valeur estimée. **Pertinent, intégré** dans le regard critique de la viz3, sans modifier la visualisation car il n'existe pas de source alternative de valorisation en open data.
+
+**3. Filtre ratio max sur la viz3**
+
+Pour rendre le scatter plot lisible malgré les valeurs aberrantes, l'IA a proposé un paramètre permettant d'exclure les ratios extrêmes. **Appliqué** dans le Shiny via un slider "Ratio maximum affiché" qui permet à l'utilisateur de choisir son seuil.
+
+**4. KPIs sur la page d'accueil du Shiny**
+
+L'IA a suggéré d'afficher des métriques clés dès la page d'accueil pour contextualiser immédiatement le tableau de bord (nombre de transferts, record absolu, période couverte, nombre de championnats). **Appliqué** : quatre `infoBox` sont présents sur la page d'accueil.
+
+**5. Âge des joueurs au moment du transfert**
+
+L'IA a proposé d'explorer l'évolution de l'âge auquel les joueurs sont recrutés dans le Big 5, en faisant l'hypothèse que les clubs achèteraient de plus en plus jeune pour maximiser la valeur de revente. **Suggestion appliquée ci-dessous** — les données révèlent en réalité une tendance inverse et inattendue, ce qui enrichit l'analyse.
+
+**6. Données de salaires comme dimension complémentaire**
+
+L'IA a évoqué la possibilité d'intégrer les salaires des joueurs pour croiser valeur marchande et rémunération. **Non appliqué** : il n'existe pas de dataset open data fiable sur les salaires réels en football, Transfermarkt ne les publie pas, et les sources comme Capology ou Spotrac ne proposent pas d'export CSV libre. La valeur marchande reste la meilleure approximation disponible.
+
+## Viz 8 — Suggestion IA appliquée : âge au transfert dans le Big 5
+
+**Question :** Les clubs recrutent-ils de plus en plus jeune ? Et à quel âge les joueurs coûtent-ils le plus cher ?
+
+```{r viz8_prep}
+# Jointure transferts + date de naissance des joueurs
+transfers_age <- transfers_clean %>%
+  left_join(
+    players %>% select(player_id, date_of_birth, position),
+    by = "player_id"
+  ) %>%
+  mutate(
+    dob              = as.Date(date_of_birth),
+    transfer_date_dt = as.Date(transfer_date),
+    # Age en annees decimales au moment du transfert
+    age = as.numeric(transfer_date_dt - dob) / 365.25
+  ) %>%
+  filter(
+    transfer_fee > 0,
+    !is.na(league_name),
+    !is.na(age),
+    age >= 15, age <= 40,  # on garde uniquement les ages plausibles
+    year >= 2002, year <= 2025
+  )
+
+# Age median par annee (toutes ligues)
+age_par_annee <- transfers_age %>%
+  group_by(year) %>%
+  summarise(age_median = median(age, na.rm = TRUE), .groups = "drop")
+
+# Age median par ligue et par annee
+age_par_ligue <- transfers_age %>%
+  group_by(year, league_name) %>%
+  summarise(age_median = median(age, na.rm = TRUE), .groups = "drop")
+
+# Fee median par tranche d'age
+age_par_tranche <- transfers_age %>%
+  mutate(tranche = cut(age,
+                       breaks = c(15, 20, 23, 26, 29, 32, 40),
+                       labels = c("15-20", "21-23", "24-26",
+                                  "27-29", "30-32", "33+"))) %>%
+  filter(!is.na(tranche)) %>%
+  group_by(tranche) %>%
+  summarise(
+    fee_median_m = median(transfer_fee_m, na.rm = TRUE),
+    nb           = n(),
+    .groups = "drop"
+  )
+```
+
+```{r viz8a, fig.height=5.5}
+# Viz 8a : evolution de l'age median au recrutement dans le temps
+p8a <- ggplot(age_par_ligue, aes(x = year, y = age_median,
+                                  color = league_name, group = league_name)) +
+  # Ligne globale toutes ligues en gris en fond (reference)
+  geom_line(data = age_par_annee,
+            aes(x = year, y = age_median, group = 1),
+            color = "grey70", linewidth = 1.5, linetype = "dashed",
+            inherit.aes = FALSE) +
+  geom_line(linewidth = 1) +
+  # Tendance globale lissee
+  geom_smooth(data = age_par_annee,
+              aes(x = year, y = age_median, group = 1),
+              method = "loess", se = FALSE, color = "grey40",
+              linewidth = 0.9, inherit.aes = FALSE) +
+  annotate("text", x = 2003, y = 24.6,
+           label = "Tendance globale (toutes ligues)",
+           color = "grey40", size = 3, fontface = "italic", hjust = 0) +
+  geom_text_repel(
+    data = age_par_ligue %>% filter(year == max(year)),
+    aes(label = league_name),
+    nudge_x = 0.4, direction = "y", hjust = 0,
+    size = 3.2, segment.color = "grey70", show.legend = FALSE
+  ) +
+  scale_color_manual(values = LEAGUE_COLORS) +
+  scale_x_continuous(breaks = seq(2002, 2025, by = 2),
+                     expand = expansion(mult = c(0.02, 0.14))) +
+  scale_y_continuous(labels = function(x) paste0(x, " ans"),
+                     breaks = seq(18, 27, by = 1)) +
+  labs(
+    title    = "Age median des joueurs recrutés dans le Big 5 (2002-2025)",
+    subtitle = "Pointillé gris = tendance globale toutes ligues — transferts payants uniquement",
+    x        = NULL,
+    y        = "Age median au transfert",
+    color    = NULL,
+    caption  = "Source : transfermarkt-datasets"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(color = "grey40", size = 10),
+    legend.position    = "none",
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    plot.caption       = element_text(color = "grey60", size = 9)
+  )
+
+p8a
+```
+
+```{r viz8b, fig.height=5}
+# Viz 8b : fee median par tranche d'age
+# Montre a quel age les joueurs valent le plus cher sur le marche
+p8b <- ggplot(age_par_tranche,
+              aes(x = tranche, y = fee_median_m, fill = tranche)) +
+  geom_col(width = 0.65, alpha = 0.88) +
+  geom_text(aes(label = paste0(round(fee_median_m, 1), "M€  (n=", nb, ")")),
+            vjust = -0.4, size = 3.2, color = "grey25") +
+  scale_fill_viridis_d(option = "plasma", begin = 0.1, end = 0.85) +
+  scale_y_continuous(
+    labels = label_dollar(prefix = "", suffix = "M€"),
+    expand = expansion(mult = c(0, 0.2))
+  ) +
+  labs(
+    title    = "Frais de transfert median par tranche d'age (2002-2025)",
+    subtitle = "Les joueurs entre 21 et 26 ans concentrent les prix les plus élevés",
+    x        = "Tranche d'age",
+    y        = "Frais median (M€)",
+    caption  = "Source : transfermarkt-datasets — transferts payants Big 5 uniquement"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(color = "grey40", size = 10),
+    legend.position    = "none",
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    plot.caption       = element_text(color = "grey60", size = 9)
+  )
+
+p8b
+```
+
+**Lecture :** La tendance est contre-intuitive, l'âge médian au recrutement a **augmenté** de 18,5 ans en 2003 à 24 ans en 2022-2024, l'inverse de ce qu'on aurait pu attendre. Les clubs ne recrutent donc pas de plus en plus jeune : ils privilégient des profils déjà confirmés. La deuxième viz explique en partie pourquoi : le pic de prix se situe entre 21 et 26 ans, ce qui correspond à des joueurs ayant déjà fait leurs preuves mais avec encore une bonne valeur de revente.
+
+**Regard critique :** L'augmentation de l'âge médian peut aussi refléter la professionnalisation du marché — les clubs analysent mieux les données et prennent moins de risques sur de très jeunes joueurs. Il faut aussi noter que les transferts gratuits (fins de contrat, prêts) ne sont pas inclus ici, et que les jeunes joueurs changent souvent de clubs sans frais, ce qui sous-représente les recrues très jeunes dans notre analyse.
+
+## Bilan
+
+L'IA générative a formalisé des biais qu'on avait supposés (inflation, circularité) et proposé des angles d'analyse complémentaires. La suggestion sur l'âge au transfert s'est révélée particulièrement intéressante car elle a produit un résultat contre-intuitif, ce qui enrichit l'analyse économique du marché.
+
+En revanche, certaines suggestions étaient hors du périmètre des données disponibles (salaires) ou trop complexes à mettre en œuvre dans ce cadre (correction par l'inflation). On les a documentées et justifié leur non-application, ce qui fait partie intégrante de la démarche d'analyse critique.
+
+
+## Utilisation de l'IA comme assistant de développement
+
+Au-delà de l'analyse des visualisations, l'IA générative a également été utilisée tout au long du projet comme assistant de développement : pour nous aider à organiser et structurer notre code, nous débloquer sur certaines parties techniques, et corriger nos fautes d'orthographe. Cette utilisation est transparente et complémentaire au travail de réflexion et de conception qui reste entièrement le nôtre.
